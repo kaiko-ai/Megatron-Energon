@@ -19,13 +19,14 @@ from megatron.energon.flavors import (
     CrudeWebdataset,
     Sample,
 )
-from megatron.energon.flavors.webdataset import MAIN_FOLDER_NAME
+from megatron.energon.flavors.webdataset.config import MAIN_FOLDER_NAME
 from megatron.energon.flavors.webdataset.metadata import (
     EnergonDatasetType,
     check_dataset_info_present,
     get_dataset_info,
     get_dataset_type,
 )
+from megatron.energon.media.extractor import MediaFilterConfig
 from megatron.energon.metadataset.loader import prepare_metadataset
 
 
@@ -143,11 +144,6 @@ def printify_json(data: Any) -> Any:
     is_flag=True,
 )
 @click.option(
-    "--continue-on-duplicates",
-    help="Continue preparation even if duplicate keys are found.",
-    is_flag=True,
-)
-@click.option(
     "--skip-dataset-yaml",
     help="Skip dataset.yaml creation (i.e. no sample loader or dataset.yaml will be created).",
     is_flag=True,
@@ -162,6 +158,26 @@ def printify_json(data: Any) -> Any:
     help='Field mapping in JSON format (e.g., \'{"image": "jpg", "caption": "txt"}\'). If not set in non-interactive mode, a sample loader from template will be created. Use with --sample-type. Only applies if sample_type is not set to CrudeWebdataset.',
     default=None,
 )
+@click.option(
+    "--media-metadata-by-glob",
+    type=str,
+    help="Media detection by using one or more glob patterns such as '*.jpg'. Separate multiple patterns by commas.",
+)
+@click.option(
+    "--media-metadata-by-header",
+    is_flag=True,
+    help="Media detection by binary file header.",
+)
+@click.option(
+    "--media-metadata-by-extension",
+    is_flag=True,
+    help="Media detection by standard file extensions.",
+)
+@click.option(
+    "--fix-duplicates",
+    help="Fix duplicate keys in the dataset.",
+    is_flag=True,
+)
 def command(
     path: EPath,
     progress: bool,
@@ -173,10 +189,13 @@ def command(
     non_interactive: bool,
     split_ratio: Optional[str],
     force_overwrite: bool,
-    continue_on_duplicates: bool,
     sample_type: Optional[str],
     field_map: Optional[str],
     skip_dataset_yaml: bool,
+    media_metadata_by_glob: str | None,
+    media_metadata_by_header: bool,
+    media_metadata_by_extension: bool,
+    fix_duplicates: bool,
 ):
     """Prepare WebDataset for use with energon.
 
@@ -185,16 +204,45 @@ def command(
     details.
     """
 
+    do_media_metadata = bool(
+        media_metadata_by_glob is not None
+        or media_metadata_by_header
+        or media_metadata_by_extension
+    )
+
+    if do_media_metadata and tar_index_only:
+        raise click.UsageError("--media-metadata-by-... cannot be combined with --tar-index-only")
+
+    media_filter_config = (
+        MediaFilterConfig.parse(
+            media_metadata_by_glob, media_metadata_by_header, media_metadata_by_extension
+        )
+        if do_media_metadata
+        else None
+    )
+
     ds_type = get_dataset_type(path)
     if ds_type == EnergonDatasetType.METADATASET:
+        if do_media_metadata:
+            raise click.ClickException(
+                "Metadatasets cannot store media metadata. Remove --media-metadata-by-... to continue."
+            )
         print("Preparing metadataset...")
         prepare_metadataset(path)
         return
     elif ds_type == EnergonDatasetType.JSONL:
+        if do_media_metadata:
+            raise click.ClickException(
+                "JSONL datasets do not support media metadata. Remove --media-metadata-by-... to continue."
+            )
         print("Preparing jsonl dataset...")
         count = CrudeJsonlDatasetFactory.prepare_dataset(path)
         print(f"Done. Found {count} samples.")
         return
+    elif ds_type == EnergonDatasetType.FILESYSTEM:
+        raise click.ClickException(
+            "Filesystem datasets must be prepared using 'energon prepare-media'."
+        )
 
     assert path.is_dir(), f"Path {path} is not a known dataset type"
 
@@ -282,7 +330,7 @@ def command(
         def progress_fn(els, length=None):
             return els
 
-    found_types, duplicates = BaseWebdatasetFactory.prepare_dataset(
+    found_types = BaseWebdatasetFactory.prepare_dataset(
         path,
         all_tars,
         split_parts_ratio=split_parts_ratio,
@@ -291,32 +339,13 @@ def command(
         tar_index_only=tar_index_only,
         shuffle_seed=42 if shuffle_tars else None,
         workers=num_workers,
+        media_filter=media_filter_config,
+        fix_duplicates=fix_duplicates,
     )
-
-    if duplicates:
-        print(f"Examples of duplicates found: {duplicates}")
-        print()
-        print(
-            "The dataset has duplicate keys. Best practice is to use unique keys. "
-            "You won't be able to use this dataset for joining "
-            "later on."
-        )
 
     found_types = list(found_types)
     if tar_index_only:
         return
-
-    if duplicates:
-        if continue_on_duplicates:
-            # Silently continue if flag is set
-            pass
-        elif non_interactive:
-            raise click.ClickException(
-                "Duplicate keys found. Use --continue-on-duplicates to proceed anyway."
-            )
-        else:
-            if not click.confirm("Do you want to continue?"):
-                return
 
     # Print json of first two samples
     for sample_idx, data in enumerate(
