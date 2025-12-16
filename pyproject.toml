@@ -23,6 +23,8 @@ classifiers = [
 dependencies = [
   "braceexpand",
   "click",
+  "filelock",
+  "filetype>=1.2.0",
   "mfusepy",
   "multi-storage-client>=0.33.0",
   "numpy",
@@ -32,6 +34,7 @@ dependencies = [
   "s3fs",
   "torch",
   "tqdm",
+  "typing_extensions",
   "webdataset",
 ]
 
